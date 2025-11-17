@@ -1,0 +1,621 @@
+library(readxl)
+Book1 <- read_excel("D:/Paper ML Argentina/D.xlsx")
+#Book1 <- read_excel("C:/Users/HP/Desktop/24 mes without.xlsx")
+#Book1 <- read_excel("C:/Users/comissoa/OneDrive - centralbankmalta.org/Desktop/Research/Argentina/12 mes without.xlsx")
+#Book1 <- read_excel("C:/Users/comissoa/OneDrive - centralbankmalta.org/Desktop/Research/Argentina/1 mes without.xlsx")
+#Book1 <- read_excel("C:/Users/HP/Desktop/12 mes without cepo.xlsx")
+#View(Book1)
+
+#set seed
+set.seed(123)
+
+dates_ <- seq(as.Date("2004-01-01"), by = "month", length.out = nrow(Book1))
+my_data_ <- data.frame(Column1 = as.Date(dates_), Column2 = Book1[,"Crisis_tag"])
+
+# Stratified
+train <- Book1[1:204,] # 2016 par atras
+test <- Book1[205:238,] #2017 para adelante
+
+table(train$Crisis_tag)
+table(test$Crisis_tag)
+
+##############################################################################################
+library(smotefamily)
+library(dplyr)
+
+train$Crisis_tag <- as.numeric(train$Crisis_tag)
+train_numeric <- train
+majority_class <- train_numeric[train_numeric$Crisis_tag == 0, ]
+minority_class <- train_numeric[train_numeric$Crisis_tag == 1, ]
+
+minority_smote <- SMOTE(minority_class[, -which(names(minority_class) == "Crisis_tag")],
+                        minority_class$Crisis_tag,
+                        K = 3, dup_size = 2)
+
+
+majority_smote <- SMOTE(majority_class[, -which(names(majority_class) == "Crisis_tag")],
+                        majority_class$Crisis_tag,
+                        K = 1, dup_size = 1)
+
+
+# Combine results
+balanced_data <- rbind(
+  data.frame(majority_smote$data),
+  data.frame(minority_smote$data)
+)
+balanced_data$Crisis_tag <- as.factor(balanced_data$class)
+unique(balanced_data$Crisis_tag)
+summary(balanced_data$Crisis_tag)
+balanced_data <- balanced_data %>% select(-class)
+balanced_data <- balanced_data %>%
+  relocate(Crisis_tag, .before = 1)
+
+train <- balanced_data
+table(train$Crisis_tag)
+
+##############################################################################################
+# RF con mtry cross validado 5 folds
+##############################################################################################
+
+library (randomForest)
+library(caret)
+
+# eliminar rows con omisiones
+train=na.omit(train)
+
+#Importante que la variable de respuesta sea categorica sino hace bagging pero con regresion.
+train$Crisis_tag=as.factor(train$Crisis_tag)
+
+# Define the training control
+ctrl <- trainControl(method = "cv", number = 5)  # 5-fold cross-validation
+
+# Define the grid of mtry values to search over
+mtry_grid <- expand.grid(mtry = seq(3, 15, by = 1))  # Change the range and step size as needed
+
+# Train the model using cross-validation
+rf_model <- train(Crisis_tag ~ ., data = train, method = "rf",
+                  trControl = ctrl, tuneGrid = mtry_grid)
+
+# Print the results
+print(rf_model)
+mtry_cv=rf_model[["bestTune"]][["mtry"]]
+
+#mtry nro de variables, al poner todas bagging es un caso particular de RF
+bag.tit = randomForest(Crisis_tag ~ . , data=train,ntree=10000,mtry=mtry_cv, importance =TRUE)
+
+#Analizamos la salida. Nos indica la tasa de error de las observaciones out of the bag (OOB) y tambien da la matriz de confusion para los mismos datos.
+bag.tit
+
+# Grafica las tasas de error globales y para cada categoria a medida que toma mas muestras bootstrap
+plot(bag.tit, main = "")
+legend("topright", legend = colnames(bag.tit$err.rate), col = 1:ncol(bag.tit$err.rate), lty = 1, cex = 1, bty = "n")
+
+# Muestra la importancia de cada variable, dependiendo del criteio de impureza considerado.
+varImpPlot(bag.tit,sort = TRUE)
+
+#saco la etiqueta
+xtest=test[,-c(1,1)]
+
+#Prediccion en un nuevo conjunto de datos
+pred.tit.bag.v = predict (bag.tit ,newdata =xtest,type = "vote")#da la proporcion de arboles que eligen cada clase.
+
+#Pongo la etiqueta por el voto mayoritario de los arboles
+pred.tit.bag.label=rep(NA,dim(test)[1]) #como si hubiera missing values genero un vector de ceros
+
+aux1=which(pred.tit.bag.v[,2]>0.50)
+aux2=which(pred.tit.bag.v[,2]<=0.50)
+pred.tit.bag.label[aux1]=1
+pred.tit.bag.label[aux2]=0
+
+#confusion matrix (test data)
+conf.matrix <- table(test$Crisis_tag, pred.tit.bag.label)
+rownames(conf.matrix) <- paste("Real", rownames(conf.matrix), sep = ":")
+colnames(conf.matrix) <- paste("Pred", colnames(conf.matrix), sep = ":")
+print(conf.matrix)
+
+# True Positive (TP), True Negative (TN), False Positive (FP), False Negative (FN)
+TP <- conf.matrix[2, 2]
+TN <- conf.matrix[1, 1]
+FP <- conf.matrix[1, 2]
+FN <- conf.matrix[2, 1]
+
+# Accuracy
+accuracy <- (TP + TN) / sum(conf.matrix)
+cat("Accuracy:", accuracy, "\n")
+
+# Precision
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+# Recall (Sensitivity)
+recall <- TP / (TP + FN)
+cat("Recall (Sensitivity):", recall, "\n")
+
+# F1 Score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+
+
+
+############################################################################
+dates_ <- seq(as.Date("2004-01-01"), by = "month", length.out = nrow(Book1))
+my_data_ <- data.frame(Column1 = as.Date(dates_), Column2 = Book1[,"Crisis_tag"])
+
+# Libraries
+library(ggplot2)
+library(dplyr)
+library(plotly)
+
+# Linea de riesgo #
+predict_risk = predict(bag.tit, newdata = Book1, type = "vote")
+colnames(predict_risk)[colnames(predict_risk) == "1"] <- "Crisis"
+colnames(predict_risk)[colnames(predict_risk) == "0"] <- "No_Crisis"
+dates <- seq(as.Date("2004-01-01"), by = "month", length.out = nrow(predict_risk))
+
+# Combine both datasets
+my_data_combined <- data.frame(
+  Date = as.Date(dates),
+  Actual_Crisis = Book1[,"Crisis_tag"],
+  Predicted_Probability = predict_risk[,"Crisis"]
+)
+
+# Combined chart with both lines
+p <- my_data_combined %>%
+  ggplot(aes(x = Date)) +
+  # Area for predicted probability
+  geom_area(aes(y = Predicted_Probability), fill = "lightblue", alpha = 0.5) +
+  # Line for predicted probability
+  geom_line(aes(y = Predicted_Probability, color = "Predicted Probability"), size = 0.3) +
+  # Line for actual crisis (binary)
+  geom_line(aes(y = Crisis_tag, color = "Actual Crisis"), size = 0.3, linetype = "solid") +
+  # Horizontal reference line
+  geom_hline(yintercept = 0.5, color = "grey", size = 0.3, linetype = "dashed") +
+  geom_vline(xintercept = as.Date("2020-12-01"), color = "black", size = 0.5, linetype = "dashed")+
+  # Labels and colors
+  ylab("Probability / Crisis Tag") +
+  xlab("") +
+  scale_color_manual(
+    name = "",
+    values = c("Predicted Probability" = "blue", "Actual Crisis" = "red")
+  ) +
+  scale_x_date(
+    date_breaks = "2 year",    # Mostrar etiquetas cada año
+    date_labels = "%Y",        # Formato: solo año
+    expand = c(0, 0)           # Eliminar padding extra
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = c(0.02, 0.02),  
+    legend.title = element_blank()
+  )
+
+p <- ggplotly(p)
+p
+
+
+######################################################################################
+######################################################################################
+
+library(shapviz)
+library(h2o)
+
+h2o.init()
+train_h20 <- as.h2o(train)
+
+xvars <- colnames(train[-1])
+fit_rf <- h2o.randomForest(xvars, "Crisis_tag", training_frame = train_h20)
+
+shp_rf <- shapviz(fit_rf, X_pred = train)
+
+sv_importance(shp_rf, kind = "bar") +
+  geom_col(fill = "#3A5F7F") +  # Color azul acero
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    text = element_text(color = "black"),
+    axis.text = element_text(color = "black")
+  )
+
+sv_importance(shp_rf, kind = "beeswarm") +
+  theme_bw() +  # Base limpia
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.border = element_rect(color = "black", fill = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    text = element_text(color = "black", size = 12),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black")
+  )
+
+sv_waterfall(shp_rf)
+
+
+
+#######################################################################
+
+var_names <- c(
+  "v34" = "Expense in official USD (million)",
+  "v97" = "Multilateral Real Exchange Rate"
+)
+
+sv_dependence(shp_rf, "v34", 
+              color_var = "v97",
+              alpha = 0.7,
+              jitter_width = 0.1) +  
+  scale_x_continuous(limits = c(2000, 13000)) +
+  labs(
+    x = var_names["v34"],              # Use named vector
+    y = "SHAP Value",
+    color = var_names["v97"],          # Use named vector
+    title = ""
+  ) +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    text = element_text(color = "black", size = 12),
+    axis.text = element_text(color = "black", size = 10),
+    axis.title = element_text(color = "black", size = 11),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.text = element_text(color = "black"),
+    legend.title = element_text(color = "black"),
+    legend.position = "top",           # Leyenda debajo
+    legend.direction = "horizontal",      # Leyenda horizontal
+    legend.box = "horizontal",            # Caja horizontal
+    legend.justification = "center"       # Centrada
+  )
+
+
+var_names <- c(
+  "v34" = "Expense in official USD (million)",
+  "v80" = "REER gap over long-run trend"
+)
+
+sv_dependence(shp_rf, "v34", 
+              color_var = "v80",
+              alpha = 0.7,
+              jitter_width = 0.1) +  
+  scale_x_continuous(limits = c(0, 15000)) +
+  labs(
+    x = var_names["v34"],              # Use named vector
+    y = "SHAP Value",
+    color = var_names["v80"],          # Use named vector
+    title = ""
+  ) +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    text = element_text(color = "black", size = 12),
+    axis.text = element_text(color = "black", size = 12),
+    axis.title = element_text(color = "black", size = 12),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.text = element_text(color = "black"),
+    legend.title = element_text(color = "black"),
+    legend.position = "top",           # Leyenda debajo
+    legend.direction = "horizontal",      # Leyenda horizontal
+    legend.box = "horizontal",            # Caja horizontal
+    legend.justification = "center"       # Centrada
+  )
+
+
+
+var_names <- c(
+  "v38" = "Employee compensation in USD (million)",
+  "v80" = "REER gap over long-run trend"
+)
+
+sv_dependence(shp_rf, "v38", 
+              color_var = "v80",
+              alpha = 0.7,
+              jitter_width = 0.1) +  
+  scale_x_continuous(limits = c(0, 2000)) +
+  labs(
+    x = var_names["v38"],              # Use named vector
+    y = "SHAP Value",
+    color = var_names["v80"],          # Use named vector
+    title = ""
+  ) +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    text = element_text(color = "black", size = 12),
+    axis.text = element_text(color = "black", size = 12),
+    axis.title = element_text(color = "black", size = 12),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.text = element_text(color = "black"),
+    legend.title = element_text(color = "black"),
+    legend.position = "top",           # Leyenda debajo
+    legend.direction = "horizontal",      # Leyenda horizontal
+    legend.box = "horizontal",            # Caja horizontal
+    legend.justification = "center"       # Centrada
+  )
+
+
+
+
+var_names <- c(
+  "v38" = "Employee compensation in USD (million)",
+  "v80" = "REER gap over long-run trend"
+)
+
+sv_dependence(shp_rf, "v38", 
+              color_var = "v80",
+              alpha = 0.7,
+              jitter_width = 0.1) +  
+  scale_x_continuous(limits = c(0, 2000)) +
+  labs(
+    x = var_names["v34"],              # Use named vector
+    y = "SHAP Value",
+    color = var_names["v80"],          # Use named vector
+    title = ""
+  ) +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    text = element_text(color = "black", size = 12),
+    axis.text = element_text(color = "black", size = 12),
+    axis.title = element_text(color = "black", size = 12),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.text = element_text(color = "black"),
+    legend.title = element_text(color = "black"),
+    legend.position = "top",           # Leyenda debajo
+    legend.direction = "horizontal",      # Leyenda horizontal
+    legend.box = "horizontal",            # Caja horizontal
+    legend.justification = "center"       # Centrada
+  )
+
+
+var_names <- c(
+  "v35" = "Interest in official USD (millions) - NFPS",
+  "v80" = "REER gap over long-run trend"
+)
+
+sv_dependence(shp_rf, "v35", 
+              color_var = "v80",
+              alpha = 0.7,
+              jitter_width = 0.1) +  
+  scale_x_continuous(limits = c(0, 2000)) +
+  labs(
+    x = var_names["v35"],              # Use named vector
+    y = "SHAP Value",
+    color = var_names["v80"],          # Use named vector
+    title = ""
+  ) +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    text = element_text(color = "black", size = 12),
+    axis.text = element_text(color = "black", size = 12),
+    axis.title = element_text(color = "black", size = 12),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.text = element_text(color = "black"),
+    legend.title = element_text(color = "black"),
+    legend.position = "top",           # Leyenda debajo
+    legend.direction = "horizontal",      # Leyenda horizontal
+    legend.box = "horizontal",            # Caja horizontal
+    legend.justification = "center"       # Centrada
+  )
+
+var_names <- c(
+  "v39" = "Net Operating Balance in USD (millions)",
+  "v80" = "REER gap over long-run trend"
+)
+
+sv_dependence(shp_rf, "v39", 
+              color_var = "v80",
+              alpha = 0.7,
+              jitter_width = 0.1) +  
+  scale_x_continuous(limits = c(-2500, 1500)) +
+  labs(
+    x = var_names["v39"],              # Use named vector
+    y = "SHAP Value",
+    color = var_names["v80"],          # Use named vector
+    title = ""
+  ) +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    text = element_text(color = "black", size = 12),
+    axis.text = element_text(color = "black", size = 12),
+    axis.title = element_text(color = "black", size = 12),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.text = element_text(color = "black"),
+    legend.title = element_text(color = "black"),
+    legend.position = "top",           # Leyenda debajo
+    legend.direction = "horizontal",      # Leyenda horizontal
+    legend.box = "horizontal",            # Caja horizontal
+    legend.justification = "center"       # Centrada
+  )
+
+
+var_names <- c(
+  "v39" = "Net Operating Balance in USD (millions)",
+  "v77" = "Monthly Estimator of Economic Activity"
+)
+
+sv_dependence(shp_rf, "v39", 
+              color_var = "v77",
+              alpha = 0.7,
+              jitter_width = 0.1) +  
+  scale_x_continuous(limits = c(-2500, 1500)) +
+  labs(
+    x = var_names["v39"],              # Use named vector
+    y = "SHAP Value",
+    color = var_names["v77"],          # Use named vector
+    title = ""
+  ) +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    text = element_text(color = "black", size = 12),
+    axis.text = element_text(color = "black", size = 12),
+    axis.title = element_text(color = "black", size = 12),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.text = element_text(color = "black"),
+    legend.title = element_text(color = "black"),
+    legend.position = "top",           # Leyenda debajo
+    legend.direction = "horizontal",      # Leyenda horizontal
+    legend.box = "horizontal",            # Caja horizontal
+    legend.justification = "center"       # Centrada
+  )
+
+
+#########################################################################
+
+library(gridExtra)
+
+
+p2 <- ggplot(data=Book1, aes(x=v35, group=factor(Crisis_tag), fill=factor(Crisis_tag))) +
+  geom_density(adjust=1.5, alpha=.6) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 0.5),  # Add black border around entire plot
+    axis.line = element_line(color = "black")  # Add black lines to axes
+  ) +
+  scale_fill_manual(
+    values = c("#076FA1", "#E3120B"),
+    name = "",
+    labels = c("No Crisis", "Crisis")
+  ) +
+  labs(x = "v35", y = "Density") +
+  xlim(-300, 1600)
+
+p2
+
+p1 <- ggplot(data=Book1, aes(x=v37, group=factor(Crisis_tag), fill=factor(Crisis_tag))) +
+  geom_density(adjust=1.5, alpha=.6) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 0.5),  # Add black border around entire plot
+    axis.line = element_line(color = "black")  # Add black lines to axes
+  ) +
+  scale_fill_manual(
+    values = c("#076FA1", "#E3120B"),
+    name = "",
+    labels = c("No Crisis", "Crisis")
+  ) +
+  labs(x = "v37", y = "Density") +
+  xlim(-2000, 6500)
+
+p1
+
+grid.arrange(p2, p1, nrow = 1)
+
+
+
+library(gridExtra)
+grid.arrange(p1, p2, nrow = 1)
+
+p2 <- ggplot(data=Book1, aes(x=v54, group=factor(Crisis_tag), fill=factor(Crisis_tag))) +
+  geom_density(adjust=1.5, alpha=.6) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 0.5),  # Add black border around entire plot
+    axis.line = element_line(color = "black")  # Add black lines to axes
+  ) +
+  scale_fill_manual(
+    values = c("#076FA1", "#E3120B"),
+    name = "",
+    labels = c("No Crisis", "Crisis")
+  ) +
+  labs(x = "v54", y = "Density") +
+  xlim(-45000, 95000)
+
+p2
+
+p1 <- ggplot(data=Book1, aes(x=v59, group=factor(Crisis_tag), fill=factor(Crisis_tag))) +
+  geom_density(adjust=1.5, alpha=.6) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 0.5),  # Add black border around entire plot
+    axis.line = element_line(color = "black")  # Add black lines to axes
+  ) +
+  scale_fill_manual(
+    values = c("#076FA1", "#E3120B"),
+    name = "",
+    labels = c("No Crisis", "Crisis")
+  ) +
+  labs(x = "v59", y = "Density") +
+  xlim(-1.5, 2.5)
+
+p1
+
+grid.arrange(p2, p1, nrow = 1)
+
+##########################################################################
+
+h2o.init()
+train_h20 <- as.h2o(test)
+
+xvars <- colnames(test[-1])
+fit_rf <- h2o.randomForest(xvars, "Crisis_tag", training_frame = train_h20)
+
+shp_rf <- shapviz(fit_rf, X_pred = test)
+
+sv_importance(shp_rf, kind = "bar") +
+  geom_col(fill = "#3A5F7F") +  # Color azul acero
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    text = element_text(color = "black"),
+    axis.text = element_text(color = "black")
+  )
+
+
+
+sv_importance(shp_rf, kind = "beeswarm", max_display = 10) +
+  theme_bw() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.border = element_rect(color = "black", fill = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    text = element_text(color = "black", size = 12),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black")
+  ) 
+
+sv_waterfall(shp_rf)
